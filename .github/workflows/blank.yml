@@ -1,40 +1,65 @@
-name: RDP
-# rdp by JoyWardanaa modifed
+
+name: Secure Windows RDP
+
 on:
-workflow_dispatch:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
 jobs:
-secure-rdp:
-runs-on: windows-latest
-timeout-minutes: 3600
-steps:
-- name: Configure Core RDP Settings By JoyWardanaa
-run: |
-Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server' -Name "fDenyTSConnections" -Value 0 -Force
-Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "UserAuthentication" -Value 0 -Force
-Set-ItemProperty -Path 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp' -Name "SecurityLayer" -Value 0 -Force
-netsh advfirewall firewall delete rule name="RDP-Tailscale"
-netsh advfirewall firewall add rule name="RDP-Tailscale" dir=in action=allow protocol=TCP localport=3389
-Restart-Service -Name TermService -Force
-- name: Create RDP User with Secure Password
-run: |
-$username = "JoyWardana"
-$password = "JoyDev@123"
-$securePass = ConvertTo-SecureString $password -AsPlainText -Force
-New-LocalUser -Name $username -Password $securePass -AccountNeverExpires
-Add-LocalGroupMember -Group "Administrators" -Member $username
-Add-LocalGroupMember -Group "Remote Desktop Users" -Member $username
-echo "RDP_CREDS=User: $username | Password: $password" >> $env:GITHUB_ENV
-if (-not (Get-LocalUser -Name $username)) {
-exit 1
-}
-- name: Install Tailscale
-run: |
-$tsUrl = "https://pkgs.tailscale.com/stable/tailscale-setup-1.82.0-amd64.msi"
-$installerPath = "$env:TEMP\tailscale.msi"
-Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
-Start-Process msiexec.exe -ArgumentList "/i", "`"$installerPath`"", "/quiet", "/norestart" -Wait
-Remove-Item $installerPath -Force
-- name: Establish Tailscale Connection
-run: |
-& "$env:ProgramFiles\Tailscale\tailscale.exe" up --authkey=${{ secrets.TAILSCALE_AUTH_KEY }} --hostname=gh-runner-$env:GITHUB_RUN_ID
-$tsIP = $nul
+  secure-rdp:
+    runs-on: [self-hosted, Windows, X64]
+    timeout-minutes: 30
+
+    steps:
+      - name: Check Windows RDP configuration
+        shell: powershell
+        run: |
+          $rdpPath = 'HKLM:\System\CurrentControlSet\Control\Terminal Server'
+          $tcpPath = 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
+
+          $rdp = Get-ItemProperty -Path $rdpPath
+          $tcp = Get-ItemProperty -Path $tcpPath
+
+          if ($rdp.fDenyTSConnections -ne 0) {
+            Write-Error "RDP is disabled. Configure it on your authorized Windows host first."
+            exit 1
+          }
+
+          if ($tcp.UserAuthentication -ne 1) {
+            Write-Error "Network Level Authentication must remain enabled."
+            exit 1
+          }
+
+          Write-Host "RDP is enabled and NLA is enabled."
+
+      - name: Check Remote Desktop service
+        shell: powershell
+        run: |
+          $service = Get-Service -Name TermService
+
+          Write-Host "RDP service status: $($service.Status)"
+
+          if ($service.Status -ne 'Running') {
+            Write-Error "Remote Desktop service is not running."
+            exit 1
+          }
+
+      - name: Check Tailscale connectivity
+        shell: powershell
+        run: |
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+
+          if (-not (Test-Path $ts)) {
+            Write-Error "Tailscale is not installed on this host."
+            exit 1
+          }
+
+          & $ts status
+
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "Unable to retrieve Tailscale status."
+            exit 1
+          }
+          
