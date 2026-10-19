@@ -1,5 +1,5 @@
 
-name: Secure Windows RDP
+name: Tailscale Connection Check
 
 on:
   workflow_dispatch:
@@ -8,58 +8,70 @@ permissions:
   contents: read
 
 jobs:
-  secure-rdp:
-    runs-on: [self-hosted, Windows, X64]
-    timeout-minutes: 30
+  tailscale-check:
+    runs-on: windows-latest
+    timeout-minutes: 10
 
     steps:
-      - name: Check Windows RDP configuration
-        shell: powershell
+      - name: Install Tailscale
+        shell: pwsh
         run: |
-          $rdpPath = 'HKLM:\System\CurrentControlSet\Control\Terminal Server'
-          $tcpPath = 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
+          $ErrorActionPreference = "Stop"
 
-          $rdp = Get-ItemProperty -Path $rdpPath
-          $tcp = Get-ItemProperty -Path $tcpPath
+          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
+          $installer = Join-Path $env:TEMP "tailscale.msi"
 
-          if ($rdp.fDenyTSConnections -ne 0) {
-            Write-Error "RDP is disabled. Configure it on your authorized Windows host first."
-            exit 1
+          Invoke-WebRequest -Uri $url -OutFile $installer
+          try {
+            $process = Start-Process msiexec.exe `
+              -ArgumentList "/i", $installer, "/quiet", "/norestart" `
+              -Wait -PassThru
+
+            if ($process.ExitCode -notin @(0, 3010)) {
+              throw "Tailscale installation failed."
+            }
+          }
+          finally {
+            Remove-Item $installer -Force -ErrorAction SilentlyContinue
           }
 
-          if ($tcp.UserAuthentication -ne 1) {
-            Write-Error "Network Level Authentication must remain enabled."
-            exit 1
-          }
-
-          Write-Host "RDP is enabled and NLA is enabled."
-
-      - name: Check Remote Desktop service
-        shell: powershell
+      - name: Connect to Tailscale
+        shell: pwsh
+        env:
+          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
         run: |
-          $service = Get-Service -Name TermService
-
-          Write-Host "RDP service status: $($service.Status)"
-
-          if ($service.Status -ne 'Running') {
-            Write-Error "Remote Desktop service is not running."
-            exit 1
-          }
-
-      - name: Check Tailscale connectivity
-        shell: powershell
-        run: |
+          $ErrorActionPreference = "Stop"
           $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
 
           if (-not (Test-Path $ts)) {
-            Write-Error "Tailscale is not installed on this host."
-            exit 1
+            throw "Tailscale executable not found."
           }
 
-          & $ts status
+          if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
+            throw "Configure TAILSCALE_AUTH_KEY in GitHub Secrets."
+          }
+
+          & $ts up "--auth-key=$env:TS_AUTHKEY" `
+            "--hostname=gh-check-$env:GITHUB_RUN_ID"
 
           if ($LASTEXITCODE -ne 0) {
-            Write-Error "Unable to retrieve Tailscale status."
-            exit 1
+            throw "Tailscale connection failed."
+          }
+
+          $ip = & $ts ip -4
+          if ($LASTEXITCODE -ne 0 -or -not $ip) {
+            throw "Unable to retrieve Tailscale IP."
+          }
+
+          Write-Output "Tailscale connection established."
+          Write-Output "Assigned Tailscale IP: $ip"
+
+      - name: Disconnect Tailscale
+        if: always()
+        shell: pwsh
+        run: |
+          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          if (Test-Path $ts) {
+            & $ts down
           }
           
