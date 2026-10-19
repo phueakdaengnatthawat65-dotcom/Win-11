@@ -1,5 +1,5 @@
 
-name: Tailscale Connection Check
+name: Secure RDP
 
 on:
   workflow_dispatch:
@@ -8,70 +8,78 @@ permissions:
   contents: read
 
 jobs:
-  tailscale-check:
+  secure-rdp:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 360
 
     steps:
+      - name: Configure secure RDP settings
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $rdpPath = 'HKLM:\System\CurrentControlSet\Control\Terminal Server'
+          $tcpPath = 'HKLM:\System\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
+
+          # Enable RDP while keeping NLA enabled
+          Set-ItemProperty -Path $rdpPath `
+            -Name 'fDenyTSConnections' -Value 0 -Force
+
+          Set-ItemProperty -Path $tcpPath `
+            -Name 'UserAuthentication' -Value 1 -Force
+
+          Set-ItemProperty -Path $tcpPath `
+            -Name 'SecurityLayer' -Value 2 -Force
+
+          # Do not open RDP to all incoming network connections.
+          # Configure access only through an approved private network.
+
+      - name: Check required Tailscale secret
+        shell: pwsh
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          if ([string]::IsNullOrWhiteSpace($env:TAILSCALE_AUTH_KEY)) {
+            throw 'Missing TAILSCALE_AUTH_KEY GitHub Actions secret.'
+          }
+
+          Write-Output 'Tailscale authentication secret is configured.'
+
       - name: Install Tailscale
         shell: pwsh
         run: |
-          $ErrorActionPreference = "Stop"
+          $ErrorActionPreference = 'Stop'
 
-          $url = "https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi"
-          $installer = Join-Path $env:TEMP "tailscale.msi"
+          $installerPath = Join-Path $env:TEMP 'tailscale.msi'
+          $tsUrl = 'https://pkgs.tailscale.com/stable/tailscale-setup-latest-amd64.msi'
 
-          Invoke-WebRequest -Uri $url -OutFile $installer
+          Invoke-WebRequest -Uri $tsUrl -OutFile $installerPath
+
           try {
             $process = Start-Process msiexec.exe `
-              -ArgumentList "/i", $installer, "/quiet", "/norestart" `
+              -ArgumentList '/i', "`"$installerPath`"", '/quiet', '/norestart' `
               -Wait -PassThru
 
             if ($process.ExitCode -notin @(0, 3010)) {
-              throw "Tailscale installation failed."
+              throw "Tailscale installation failed: $($process.ExitCode)"
             }
           }
           finally {
-            Remove-Item $installer -Force -ErrorAction SilentlyContinue
+            Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
           }
 
-      - name: Connect to Tailscale
-        shell: pwsh
-        env:
-          TS_AUTHKEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
-
-          if (-not (Test-Path $ts)) {
-            throw "Tailscale executable not found."
-          }
-
-          if ([string]::IsNullOrWhiteSpace($env:TS_AUTHKEY)) {
-            throw "Configure TAILSCALE_AUTH_KEY in GitHub Secrets."
-          }
-
-          & $ts up "--auth-key=$env:TS_AUTHKEY" `
-            "--hostname=gh-check-$env:GITHUB_RUN_ID"
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Tailscale connection failed."
-          }
-
-          $ip = & $ts ip -4
-          if ($LASTEXITCODE -ne 0 -or -not $ip) {
-            throw "Unable to retrieve Tailscale IP."
-          }
-
-          Write-Output "Tailscale connection established."
-          Write-Output "Assigned Tailscale IP: $ip"
-
-      - name: Disconnect Tailscale
-        if: always()
+      - name: Verify Tailscale installation
         shell: pwsh
         run: |
-          $ts = "$env:ProgramFiles\Tailscale\tailscale.exe"
-          if (Test-Path $ts) {
-            & $ts down
+          $ErrorActionPreference = 'Stop'
+
+          $tsExe = Join-Path $env:ProgramFiles 'Tailscale\tailscale.exe'
+
+          if (-not (Test-Path $tsExe)) {
+            throw 'Tailscale executable was not found.'
           }
+
+          Write-Output 'Tailscale is installed.'
           
